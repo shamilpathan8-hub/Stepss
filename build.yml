@@ -1,0 +1,149 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project
+        run: |
+          mkdir -p app/src/main/java/com/example/stepcounter
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "StepCounter"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.stepcounter"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.stepcounter"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+              <uses-feature android:name="android.hardware.sensor.stepdetector" android:required="false" />
+              <application
+                  android:label="Step Counter"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/example/stepcounter/MainActivity.kt <<'EOF'
+          package com.example.stepcounter
+
+          import android.Manifest
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.hardware.*
+          import android.os.Build
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.widget.*
+
+          class MainActivity : android.app.Activity(), SensorEventListener {
+              private lateinit var sm: SensorManager
+              private lateinit var countText: TextView
+              private lateinit var infoText: TextView
+              private var steps = 0
+              private val prefs by lazy { getSharedPreferences("steps", Context.MODE_PRIVATE) }
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  steps = prefs.getInt("count", 0)
+                  countText = TextView(this).apply {
+                      textSize = 80f; gravity = Gravity.CENTER; setTextColor(Color.parseColor("#2E7D32"))
+                  }
+                  infoText = TextView(this).apply { textSize = 16f; gravity = Gravity.CENTER }
+                  val reset = Button(this).apply {
+                      text = "Reset"
+                      setOnClickListener { steps = 0; save(); render() }
+                  }
+                  setContentView(LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(48, 48, 48, 48)
+                      addView(TextView(context).apply { text = "Steps"; textSize = 22f; gravity = Gravity.CENTER })
+                      addView(countText); addView(infoText); addView(reset)
+                  })
+                  sm = getSystemService(SENSOR_SERVICE) as SensorManager
+                  render()
+                  if (Build.VERSION.SDK_INT >= 29 &&
+                      checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED
+                  ) requestPermissions(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION), 1)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  val s = sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+                  if (s == null) infoText.text = "No step sensor on this device"
+                  else sm.registerListener(this, s, SensorManager.SENSOR_DELAY_NORMAL)
+              }
+
+              override fun onPause() { super.onPause(); sm.unregisterListener(this); save() }
+
+              override fun onSensorChanged(e: SensorEvent) {
+                  if (e.sensor.type == Sensor.TYPE_STEP_DETECTOR) { steps++; render() }
+              }
+
+              override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+
+              private fun save() = prefs.edit().putInt("count", steps).apply()
+
+              private fun render() {
+                  countText.text = steps.toString()
+                  infoText.text = "%.2f km  |  %d kcal".format(steps * 0.0008, (steps * 0.04).toInt())
+              }
+          }
+          EOF
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StepCounter-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
